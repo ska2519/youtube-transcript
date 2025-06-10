@@ -47,6 +47,11 @@ export class YoutubeTranscriptNotAvailableLanguageError extends YoutubeTranscrip
   }
 }
 
+export class YoutubeTranscriptEmptyError extends YoutubeTranscriptError {
+  constructor(videoId: string, method: string) {
+    super(`The transcript file URL returns an empty response using ${method} (${videoId})`);
+  }
+}
 export interface TranscriptConfig {
   lang?: string;
 }
@@ -70,6 +75,23 @@ export class YoutubeTranscript {
     videoId: string,
     config?: TranscriptConfig
   ): Promise<TranscriptResponse[]> {
+    try {
+      return await this.fetchTranscriptWithHtmlScraping(videoId, config);
+    } catch (e) {
+      if (e instanceof YoutubeTranscriptEmptyError) {
+        return await this.fetchTranscriptWithInnerTube(videoId, config);
+      } else { 
+        throw e;
+      }
+    }
+  }
+
+  /**
+   * Fetch transcript from YTB Video using HTML scraping
+   * @param videoId Video url or video identifier
+   * @param config Get transcript in a specific language ISO
+   */
+  private static async fetchTranscriptWithHtmlScraping(videoId: string, config?: TranscriptConfig) {
     const identifier = this.retrieveVideoId(videoId);
     const videoPageResponse = await fetch(
       `https://www.youtube.com/watch?v=${identifier}`,
@@ -104,6 +126,80 @@ export class YoutubeTranscript {
       }
     })()?.['playerCaptionsTracklistRenderer'];
 
+    const processedTranscript = await this.processTranscriptFromCaptions(
+      captions,
+      videoId,
+      config
+    );
+
+    if (!processedTranscript.length) {
+      throw new YoutubeTranscriptEmptyError(videoId, 'HTML scraping');
+    }
+
+    return processedTranscript;
+  }
+
+  /**
+   * Fetch transcript from YTB Video using InnerTube API
+   * @param videoId Video url or video identifier
+   * @param config Get transcript in a specific language ISO
+   */
+  private static async fetchTranscriptWithInnerTube(
+    videoId: string,
+    config?: TranscriptConfig
+  ): Promise<TranscriptResponse[]> {
+    const identifier = this.retrieveVideoId(videoId);
+    const options = {
+      method: 'POST',
+      headers: {
+        ...(config?.lang && { 'Accept-Language': config.lang }),
+        'Content-Type': 'application/json',
+        Origin: 'https://www.youtube.com',
+        Referer: `https://www.youtube.com/watch?v=${identifier}`
+      },
+      body: JSON.stringify({
+        context: {
+          client: {
+            clientName: 'WEB',
+            clientVersion: '2.20250312.04.00',
+            userAgent: USER_AGENT
+          }
+        },
+        videoId: identifier,
+      }),
+    }
+    
+    const InnerTubeApiResponse = await fetch(
+      'https://www.youtube.com/youtubei/v1/player?key=AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8',
+      options
+    );
+
+    const { captions: { playerCaptionsTracklistRenderer: captions } } = await InnerTubeApiResponse.json();
+
+    const processedTranscript = await this.processTranscriptFromCaptions(
+      captions,
+      videoId,
+      config
+    );
+
+    if (!processedTranscript.length) {
+      throw new YoutubeTranscriptEmptyError(videoId, 'InnerTube API');
+    }
+
+    return processedTranscript;
+  }
+
+  /**
+   * Process transcript from data captions
+   * @param captions Data captions
+   * @param videoId Video url or video identifier
+   * @param config Get transcript in a specific language ISO
+   */
+  private static async processTranscriptFromCaptions(
+    captions: any,
+    videoId: string,
+    config?: TranscriptConfig
+  ): Promise<TranscriptResponse[]> {
     if (!captions) {
       throw new YoutubeTranscriptDisabledError(videoId);
     }
